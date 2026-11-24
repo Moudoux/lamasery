@@ -1,0 +1,125 @@
+# lamasery configuration
+#
+# lamasery looks for `lamasery.yaml` next to its own binary, or takes
+# `--config <file>`. Relative paths are relative to this file's directory.
+#
+# Anywhere a path or argument is written you can use:
+#   ~/...        your home directory
+#   ${name}      a value from `vars` below, or an environment variable
+
+# Path to the llama-server binary.
+llama_server: ${llama}/build/bin/llama-server
+
+# Shortcuts for long paths, used as ${name} below.
+vars:
+  llama: ~/Documents/Code/llama.cpp
+  models: ~/Documents/Models
+
+# Address llama-server listens on (each model picks its own port).
+host: 127.0.0.1
+
+# Directory llama-server runs in. Relative model paths resolve against it.
+# Defaults to the directory of this file.
+# working_dir: ${llama}
+
+# Arguments given to every model, before the model's own `args`.
+common_args:
+  -fa: on
+  --no-warmup: true
+
+# Command used to open the web UI. Defaults to xdg-open.
+# browser: firefox
+
+# Terminal used for tools marked `new_window: true`. The tool's command is
+# appended to this list.
+# terminal: [kitty, --]
+# terminal: [alacritty, -e]
+
+# Log lines kept in memory per model.
+log_lines: 5000
+
+# Each model's llama-server output is also appended, with timestamps, to
+# <log_dir>/<model-name>.log. Defaults to `logs` next to this file; set it to
+# "" to turn log files off.
+# log_dir: ~/.local/state/lamasery
+
+# Each model is one llama-server instance. `model` and `port` become
+# -m / --port; `host` above becomes --host.
+#
+# Other llama-server flags go under `args`, one per line:
+#   -c: 32768            a flag and its value
+#   --no-warmup: true    a flag without a value
+#   --mmap: false        left out (handy to switch a flag off quickly)
+#   --lora: [a, b]       a list repeats the flag (--lora a --lora b)
+# Quote values containing `: `, `#`, `{` or `[`, e.g. JSON:
+#   --chat-template-kwargs: '{"enable_thinking": false}'
+#
+# You can also write args as a list in shell syntax if you prefer:
+#   args:
+#     - -c 32768
+#     - --no-warmup
+models:
+  - name: Example 7B
+    model: ${models}/example-7b-Q4_K_M.gguf
+    port: 8080
+    # Name clients use for this model (llama-server --alias).
+    alias: example-7b
+    args:
+      -c: 32768
+      -ctk: q8_0
+      -ctv: q8_0
+      --temp: 0.7
+      --chat-template-kwargs: '{"enable_thinking": false}'
+    # Extra environment variables for llama-server.
+    # env:
+    #   CUDA_VISIBLE_DEVICES: "0"
+
+# Tools you can launch against a running model. The model selected in the
+# list is the backend. These placeholders are filled in at launch time:
+#   ${base_url}  http://host:port         (Anthropic-style APIs)
+#   ${api_base}  http://host:port/v1      (OpenAI-style APIs)
+#   ${host} ${port}
+#   ${model}     the model's alias, or the .gguf file name without extension
+#   ${ctx}       context size per request, read from the running server
+#                (accounts for -fit shrinking it), else from -c / -np
+#   ${max_output}  the -n value, if set
+# An env var whose placeholder can't be filled is left unset.
+#
+# By default a tool takes over this terminal and lamasery comes back when it
+# exits; the servers keep running meanwhile. Set `new_window: true` to open
+# it in the `terminal` set above instead.
+tools:
+  - name: Claude Code
+    command: claude
+    env:
+      ANTHROPIC_BASE_URL: ${base_url}
+      ANTHROPIC_AUTH_TOKEN: lamasery
+      ANTHROPIC_MODEL: ${model}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${model}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${model}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${model}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${model}
+      # Context size and output cap, so /context and auto-compact are right.
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: ${ctx}
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: ${max_output}
+      # Don't send Anthropic-only beta fields llama-server may reject.
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      API_TIMEOUT_MS: "3000000"
+
+  # A shell with OpenAI-compatible variables set, for anything else.
+  - name: Shell (OpenAI env)
+    command: ${SHELL}
+    env:
+      OPENAI_BASE_URL: ${api_base}
+      OPENAI_API_BASE: ${api_base}
+      OPENAI_API_KEY: lamasery
+      OPENAI_MODEL: ${model}
+
+  # - name: Aider
+  #   command: aider
+  #   args:
+  #     --model: openai/${model}
+  #   env:
+  #     OPENAI_API_BASE: ${api_base}
+  #     OPENAI_API_KEY: lamasery
