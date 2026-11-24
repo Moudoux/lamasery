@@ -335,16 +335,15 @@ impl Session<'_> {
         let _ = out.flush();
     }
 
-    fn draw_status(&self) {
-        let (icon, color) = match self.status {
+    /// The status-bar items for `status`.
+    fn info(&self, status: Status, tick: usize) -> Vec<(String, Color)> {
+        let (icon, color) = match status {
             Status::Ready => ("●".to_string(), OK),
-            Status::Loading | Status::Stopping => {
-                (SPINNER[self.tick % SPINNER.len()].to_string(), WARN)
-            }
+            Status::Loading | Status::Stopping => (SPINNER[tick % SPINNER.len()].to_string(), WARN),
             _ => ("○".to_string(), BAD),
         };
         let mut info: Vec<(String, Color)> = vec![
-            (format!("{icon} {}", self.status.label()), color),
+            (format!("{icon} {}", status.label()), color),
             (self.model.name.clone(), Color::White),
             (server::base_url(&self.cfg.host, self.model.port), ACCENT2),
         ];
@@ -358,6 +357,28 @@ impl Session<'_> {
         if let Some(t) = self.tps {
             info.push((format!("{t:.1} tok/s"), PINK));
         }
+        info
+    }
+
+    /// The status bar shown under a tool running in the pty. Polls the
+    /// server quietly; its status changes are reported once the tool exits.
+    fn tool_bar(&mut self, w: usize, tool: &str, tick: usize) -> String {
+        let status = match self.server.as_mut() {
+            Some(srv) => srv.poll().0,
+            None => self.status,
+        };
+        {
+            let logs = self.logs.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = logs.lines.iter().rev().find_map(|l| parse_tps(l)) {
+                self.tps = Some(t);
+            }
+        }
+        let info = self.info(status, tick);
+        bar_line(&info, &[], &format!("in {tool}"), w)
+    }
+
+    fn draw_status(&self) {
+        let mut info = self.info(self.status, self.tick);
         if !self.show_logs {
             info.push((format!("logs off ({} hidden)", self.hidden), WARN));
         }
@@ -374,53 +395,10 @@ impl Session<'_> {
             &[("r", "start"), ("q", "menu")]
         };
 
-        let w = term::width() - 1;
-        let info_len: usize = info.iter().map(|(s, _)| s.chars().count() + 3).sum();
-        // Show as many key hints as fit.
-        let mut n_keys = keys.len();
-        let keys_len = |n: usize| {
-            keys[..n]
-                .iter()
-                .map(|(k, d)| k.len() + d.len() + 3)
-                .sum::<usize>()
-        };
-        while n_keys > 0 && info_len + 2 + keys_len(n_keys) > w {
-            n_keys -= 1;
-        }
-
+        let line = bar_line(&info, keys, "", term::width() - 1);
         let mut out = io::stdout();
         let _ = queue!(out, MoveToColumn(0), Clear(ClearType::CurrentLine));
-        let mut used = 0;
-        for (i, (s, c)) in info.iter().enumerate() {
-            let sep = if i == 0 { "" } else { " · " };
-            let room = w.saturating_sub(used + sep.len());
-            if room == 0 {
-                break;
-            }
-            let s = term::fit(s, room);
-            used += sep.chars().count() + s.chars().count();
-            let _ = write!(
-                out,
-                "{}{}",
-                sep.with(DIM),
-                if i == 0 {
-                    s.with(*c).bold()
-                } else {
-                    s.with(*c)
-                }
-            );
-        }
-        if n_keys > 0 {
-            let _ = write!(out, "  ");
-            for (k, d) in &keys[..n_keys] {
-                let _ = write!(
-                    out,
-                    " {} {}",
-                    k.with(ACCENT).bold(),
-                    d.to_string().with(DIM)
-                );
-            }
-        }
+        let _ = write!(out, "{line}");
         let _ = out.flush();
     }
 
@@ -556,12 +534,10 @@ impl Session<'_> {
             ),
             ACCENT2,
         );
-        let status = term::cooked(|| {
-            Command::new(&argv[0])
-                .args(&argv[1..])
-                .envs(&env)
-                .status()
-                .with_context(|| format!("cannot run {}", argv[0]))
+        let mut tick = 0;
+        let status = crate::pty::run(&argv, &env, &mut |w| {
+            tick += 1;
+            self.tool_bar(w, &tool.name, tick)
         });
         // Skip what the server logged while the tool had the terminal.
         let skipped = {
@@ -582,6 +558,63 @@ impl Session<'_> {
         self.note(&msg, if st.success() { ACCENT2 } else { WARN });
         Ok(())
     }
+}
+
+/// One styled status line: `info` items separated by dots, then as many key
+/// hints as fit, then `note` if there's room. Never wider than `w`.
+fn bar_line(info: &[(String, Color)], keys: &[(&str, &str)], note: &str, w: usize) -> String {
+    use std::fmt::Write as _;
+    let info_len: usize = info.iter().map(|(s, _)| s.chars().count() + 3).sum();
+    // Show as many key hints as fit.
+    let mut n_keys = keys.len();
+    let keys_len = |n: usize| {
+        keys[..n]
+            .iter()
+            .map(|(k, d)| k.len() + d.len() + 3)
+            .sum::<usize>()
+    };
+    while n_keys > 0 && info_len + 2 + keys_len(n_keys) > w {
+        n_keys -= 1;
+    }
+
+    let mut out = String::new();
+    let mut used = 0;
+    for (i, (s, c)) in info.iter().enumerate() {
+        let sep = if i == 0 { "" } else { " · " };
+        let room = w.saturating_sub(used + sep.chars().count());
+        if room == 0 {
+            break;
+        }
+        let s = term::fit(s, room);
+        used += sep.chars().count() + s.chars().count();
+        let _ = write!(
+            out,
+            "{}{}",
+            sep.with(DIM),
+            if i == 0 {
+                s.with(*c).bold()
+            } else {
+                s.with(*c)
+            }
+        );
+    }
+    if n_keys > 0 {
+        out.push_str("  ");
+        used += 2;
+        for (k, d) in &keys[..n_keys] {
+            used += k.len() + d.len() + 2;
+            let _ = write!(
+                out,
+                " {} {}",
+                k.with(ACCENT).bold(),
+                d.to_string().with(DIM)
+            );
+        }
+    }
+    if !note.is_empty() && used + 2 + note.chars().count() <= w {
+        let _ = write!(out, "  {}", note.to_string().with(DIM));
+    }
+    out
 }
 
 fn clear_status() {

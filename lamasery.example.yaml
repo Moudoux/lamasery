@@ -85,9 +85,9 @@ models:
 #   ${max_output}  the -n value, if set
 # An env var whose placeholder can't be filled is left unset.
 #
-# By default a tool takes over this terminal and lamasery comes back when it
-# exits; the servers keep running meanwhile. Set `new_window: true` to open
-# it in the `terminal` set above instead.
+# By default a tool runs in this terminal, above lamasery's status bar, and
+# lamasery comes back when it exits; the servers keep running meanwhile.
+# Set `new_window: true` to open it in the `terminal` set above instead.
 tools:
   - name: Claude Code
     command: claude

@@ -2,6 +2,7 @@
 
 mod config;
 mod mem;
+mod pty;
 mod server;
 mod session;
 mod term;

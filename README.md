@@ -25,8 +25,11 @@ Without `--config`, lamasery reads `lamasery.yaml` next to its own binary.
 | `c` | clear the screen |
 | `q`, `ctrl-c` | stop the server and go back to the menu (`ctrl-c` twice kills) |
 
-Tools take over the terminal while they run; the server keeps running and
-you're back in the session when the tool exits.
+Tools run in this terminal above the status bar, which stays visible (model
+status, VRAM and RAM, tok/s). The server keeps running and you're back in
+the session when the tool exits. lamasery emulates the terminal for the tool,
+so scrolling back through the tool's output with the terminal's own
+scrollback doesn't work while it runs.
 
 ## Config
 
