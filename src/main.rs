@@ -1,6 +1,7 @@
 //! lamasery: pick a llama.cpp model, run it, and point your tools at it.
 
 mod config;
+mod mem;
 mod server;
 mod session;
 mod term;
@@ -166,6 +167,7 @@ fn run(path: Option<PathBuf>, model: Option<String>) -> Result<()> {
     let mut cfg = config::load(&path)?;
     let first = model.map(|q| find_model(&cfg, &q)).transpose()?;
 
+    mem::start();
     let _raw = term::RawGuard::new()?;
     banner(&cfg);
     let mut selected = first.unwrap_or(0);

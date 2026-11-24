@@ -348,6 +348,7 @@ impl Session<'_> {
             (self.model.name.clone(), Color::White),
             (server::base_url(&self.cfg.host, self.model.port), ACCENT2),
         ];
+        info.extend(crate::mem::segments());
         if let Some(srv) = &self.server {
             info.push((
                 format!("up {}", fmt_duration(srv.started.elapsed().as_secs())),

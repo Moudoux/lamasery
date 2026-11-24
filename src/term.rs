@@ -206,7 +206,23 @@ pub fn select(
                 )?;
             }
         }
-        write!(out, "{}", fit(footer, w - 1).with(DIM))?;
+        // Memory first, then as much of the key hints as fits.
+        let mut room = w - 1;
+        for (i, (s, c)) in crate::mem::segments().iter().enumerate() {
+            let sep = if i == 0 { "  " } else { " · " };
+            let n = sep.chars().count() + s.chars().count();
+            if n > room {
+                break;
+            }
+            room -= n;
+            write!(out, "{}{}", sep.with(DIM), s.clone().with(*c))?;
+        }
+        let footer = if room < w - 1 {
+            format!("  {}", footer.trim_start())
+        } else {
+            footer.to_string()
+        };
+        write!(out, "{}", fit(&footer, room).with(DIM))?;
         out.flush()?;
         drawn = true;
 
