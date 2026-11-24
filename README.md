@@ -60,3 +60,25 @@ tools:
 
 `args` can also be a list of shell-style strings (`- -c 131072`). Each entry is
 split into words like a shell would, so quote anything that must stay one word.
+
+A tool can also be downloaded and configured by lamasery. `download` pins a
+release file by url and sha256; it's fetched into `tools/<tool>/dist` (next to
+the config, gitignored) on first launch and again when either value changes.
+`files` are config files written at every launch with the placeholders filled
+in, so they always match the running model. The example config sets up the
+[pi](https://github.com/earendil-works/pi) coding agent this way:
+
+```yaml
+  - name: pi
+    download:
+      url: https://github.com/earendil-works/pi/releases/download/v1.6.0/pi-linux-x64.tar.gz
+      sha256: ef77dbe4379b3bdeb425a1e1b862fa3c915c255000dfe4965c98eee96a5765d1
+    command: ${tool_dir}/dist/pi/pi
+    args:
+      --model: lamasery/${model}
+    env:
+      PI_CODING_AGENT_DIR: ${tool_dir}/agent
+    files:
+      agent/models.json: |
+        {"providers": {"lamasery": {"baseUrl": "${api_base}", ...}}}
+```

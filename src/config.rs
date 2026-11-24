@@ -26,6 +26,7 @@ struct RawConfig {
     #[serde(default = "default_log_lines")]
     log_lines: usize,
     log_dir: Option<String>,
+    tools_dir: Option<String>,
     #[serde(default)]
     models: Vec<RawModel>,
     #[serde(default)]
@@ -58,6 +59,16 @@ struct RawTool {
     env: BTreeMap<String, String>,
     #[serde(default)]
     new_window: bool,
+    download: Option<RawDownload>,
+    #[serde(default)]
+    files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDownload {
+    url: String,
+    sha256: String,
 }
 
 /// llama-server arguments, written either as a map or as a list:
@@ -147,6 +158,8 @@ pub struct Config {
     pub log_dir: Option<PathBuf>,
     pub models: Vec<ModelConfig>,
     pub tools: Vec<ToolConfig>,
+    /// Where each tool's own folder is (`<tools_dir>/<slug of its name>`).
+    pub tools_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +206,25 @@ pub struct ToolConfig {
     pub args: Args,
     pub env: BTreeMap<String, String>,
     pub new_window: bool,
+    /// The tool's own folder, `${tool_dir}` in its templates: downloads go in
+    /// `dist/` there, and `files` are relative to it.
+    pub dir: PathBuf,
+    pub download: Option<crate::install::Download>,
+    /// Paths relative to `dir` and their templates, written at each launch.
+    pub files: BTreeMap<String, String>,
+}
+
+/// A tool's folder name: its name in lowercase, other characters as `-`.
+pub fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 /// Find the config: explicit flag first, then next to the executable.
@@ -294,17 +326,56 @@ pub fn load(path: &Path) -> Result<Config> {
         });
     }
 
-    let tools = raw
-        .tools
-        .into_iter()
-        .map(|t| ToolConfig {
+    let tools_dir = raw
+        .tools_dir
+        .as_deref()
+        .map(|d| resolve(d, &base))
+        .unwrap_or_else(|| base.join("tools"));
+    let mut tools = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for t in raw.tools {
+        let slug = slug(&t.name);
+        if slug.is_empty() {
+            bail!("tool name {:?} needs a letter or digit", t.name);
+        }
+        if !seen.insert(slug.clone()) {
+            bail!(
+                "tool {:?}: another tool already uses the folder {slug}",
+                t.name
+            );
+        }
+        for path in t.files.keys() {
+            let p = Path::new(path);
+            if p.is_absolute()
+                || p.components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                bail!(
+                    "tool {:?}: file {path:?} must be a plain path inside the tool's folder",
+                    t.name
+                );
+            }
+        }
+        let download = t.download.map(|d| crate::install::Download {
+            url: expand(&d.url, &vars),
+            sha256: expand(&d.sha256, &vars),
+        });
+        if let Some(d) = &download
+            && (d.sha256.len() != 64 || !d.sha256.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            bail!("tool {:?}: download sha256 must be 64 hex digits", t.name);
+        }
+        tools.push(ToolConfig {
+            dir: tools_dir.join(&slug),
             name: t.name,
             command: t.command,
             args: t.args,
             env: t.env,
             new_window: t.new_window,
-        })
-        .collect();
+            download,
+            files: t.files,
+        });
+    }
 
     let log_dir = match raw.log_dir.as_deref() {
         Some("") => None,
@@ -323,6 +394,7 @@ pub fn load(path: &Path) -> Result<Config> {
         log_dir,
         models,
         tools,
+        tools_dir,
     })
 }
 

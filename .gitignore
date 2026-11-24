@@ -4,3 +4,5 @@
 # Personal config; see lamasery.example.yaml
 /lamasery.yaml
 /lamasery.yml
+/run.sh
+/tools

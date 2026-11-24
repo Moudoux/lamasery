@@ -1,6 +1,7 @@
 //! lamasery: pick a llama.cpp model, run it, and point your tools at it.
 
 mod config;
+mod install;
 mod mem;
 mod pty;
 mod server;
@@ -108,8 +109,26 @@ fn check(path: Option<PathBuf>) -> Result<()> {
         );
         println!("  {}", server::command_line(&cfg, m));
     }
-    let tools: Vec<&str> = cfg.tools.iter().map(|t| t.name.as_str()).collect();
-    println!("\n{} {}", "tools".with(DIM), tools.join(", "));
+    if !cfg.tools.is_empty() {
+        println!("\n{} {}", "tools in".with(DIM), cfg.tools_dir.display());
+    }
+    for t in &cfg.tools {
+        print!("  {}", t.name.clone().bold());
+        match &t.download {
+            Some(d) if install::is_current(&t.dir, d) => {
+                print!("  {}", format!("downloaded: {}", d.url).with(DIM))
+            }
+            Some(d) => print!(
+                "  {}",
+                format!("downloads on first launch: {}", d.url).with(term::WARN)
+            ),
+            None => {}
+        }
+        println!();
+        for path in t.files.keys() {
+            println!("    {}", t.dir.join(path).display().to_string().with(DIM));
+        }
+    }
     if problems > 0 {
         bail!("{problems} problem(s) found");
     }

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,6 +18,7 @@ use crossterm::style::{Color, Stylize};
 use crossterm::terminal::{Clear, ClearType};
 
 use crate::config::{self, Config, ModelConfig, ToolConfig};
+use crate::install;
 use crate::server::{self, LogBuf, Logs, STOP_TIMEOUT, Server, Status};
 use crate::term::{self, ACCENT, ACCENT2, BAD, DIM, Item, OK, Pick, WARN};
 
@@ -506,6 +508,7 @@ impl Session<'_> {
 
     fn launch(&mut self, tool: &ToolConfig) -> Result<()> {
         let ctx = server::fetch_ctx(&server::base_url(&self.cfg.host, self.model.port));
+        self.prepare(tool, ctx)?;
         let (argv, env) = tool_command(self.cfg, tool, self.model, ctx)?;
         if self.status == Status::Loading {
             self.note(
@@ -556,6 +559,49 @@ impl Session<'_> {
         }
         term::line("");
         self.note(&msg, if st.success() { ACCENT2 } else { WARN });
+        Ok(())
+    }
+}
+
+impl Session<'_> {
+    /// Download the tool if its pinned download changed or is missing, and
+    /// write its config files for the current model.
+    fn prepare(&mut self, tool: &ToolConfig, ctx: Option<u64>) -> Result<()> {
+        if let Some(d) = &tool.download
+            && !install::is_current(&tool.dir, d)
+        {
+            self.flush_logs();
+            self.note(&format!("downloading {}: {}", tool.name, d.url), ACCENT2);
+            let mut shown = 0u64;
+            let result = install::install(&tool.dir, d, &mut |done, total| {
+                // Redraw about every MiB.
+                if done < shown + (1 << 20) && Some(done) != total {
+                    return;
+                }
+                shown = done;
+                let mib = |b: u64| b as f64 / (1u64 << 20) as f64;
+                let text = match total {
+                    Some(t) => format!("  {:.1} / {:.1} MiB", mib(done), mib(t)),
+                    None => format!("  {:.1} MiB", mib(done)),
+                };
+                clear_status();
+                print!("{}", text.with(DIM));
+                let _ = io::stdout().flush();
+            });
+            clear_status();
+            result.with_context(|| format!("cannot install {}", tool.name))?;
+            self.note(
+                &format!(
+                    "installed {} in {}",
+                    tool.name,
+                    install::dist_dir(&tool.dir).display()
+                ),
+                ACCENT2,
+            );
+        }
+        for (path, content) in tool_files(self.cfg, tool, self.model, ctx)? {
+            install::write_if_changed(&path, &content)?;
+        }
         Ok(())
     }
 }
@@ -631,9 +677,69 @@ pub fn tool_command(
     m: &ModelConfig,
     ctx: Option<u64>,
 ) -> Result<(Vec<String>, BTreeMap<String, String>)> {
+    let vars = tool_vars(cfg, tool, m, ctx);
+    let mut argv = config::split_args(std::slice::from_ref(&tool.command), &vars)?;
+    if argv.is_empty() {
+        bail!("tool {} has an empty command", tool.name);
+    }
+    argv.extend(tool.args.to_argv(&vars)?);
+    // Leave out variables whose placeholders couldn't be filled (e.g. no
+    // known context size) rather than passing a literal `${ctx}`.
+    let env = tool
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), config::expand(v, &vars)))
+        .filter(|(_, v)| !v.contains("${"))
+        .collect();
+    Ok((argv, env))
+}
+
+/// A tool's `files`, filled in for `m`: where each goes and its content.
+/// A placeholder that can't be filled is an error, since a config file
+/// with a literal `${ctx}` in it would be broken.
+pub fn tool_files(
+    cfg: &Config,
+    tool: &ToolConfig,
+    m: &ModelConfig,
+    ctx: Option<u64>,
+) -> Result<Vec<(PathBuf, String)>> {
+    let vars = tool_vars(cfg, tool, m, ctx);
+    let mut out = Vec::new();
+    for (path, template) in &tool.files {
+        let content = config::expand(template, &vars);
+        for name in ["ctx", "max_output"] {
+            if content.contains(&format!("${{{name}}}")) {
+                bail!(
+                    "{}: can't fill ${{{name}}} in {path} for {} (no {} known)",
+                    tool.name,
+                    m.name,
+                    if name == "ctx" {
+                        "context size"
+                    } else {
+                        "-n value"
+                    }
+                );
+            }
+        }
+        out.push((tool.dir.join(path), content));
+    }
+    Ok(out)
+}
+
+/// The placeholders a tool's templates can use for model `m`.
+fn tool_vars(
+    cfg: &Config,
+    tool: &ToolConfig,
+    m: &ModelConfig,
+    ctx: Option<u64>,
+) -> BTreeMap<String, String> {
     let base = server::base_url(&cfg.host, m.port);
     let mut vars = cfg.vars.clone();
     vars.extend([
+        (
+            "tool_dir".to_string(),
+            tool.dir.to_string_lossy().into_owned(),
+        ),
         ("base_url".to_string(), base.clone()),
         ("api_base".to_string(), format!("{base}/v1")),
         (
@@ -661,20 +767,7 @@ pub fn tool_command(
     {
         vars.insert("max_output".into(), n.to_string());
     }
-    let mut argv = config::split_args(std::slice::from_ref(&tool.command), &vars)?;
-    if argv.is_empty() {
-        bail!("tool {} has an empty command", tool.name);
-    }
-    argv.extend(tool.args.to_argv(&vars)?);
-    // Leave out variables whose placeholders couldn't be filled (e.g. no
-    // known context size) rather than passing a literal `${ctx}`.
-    let env = tool
-        .env
-        .iter()
-        .map(|(k, v)| (k.clone(), config::expand(v, &vars)))
-        .filter(|(_, v)| !v.contains("${"))
-        .collect();
-    Ok((argv, env))
+    vars
 }
 
 pub fn spawn_detached(
@@ -801,5 +894,44 @@ mod tests {
         // Unknown values leave the variable unset.
         let (_, env) = tool_command(&cfg, &cfg.tools[0], &cfg.models[1], None).unwrap();
         assert!(!env.contains_key("CTX") && !env.contains_key("OUT"));
+    }
+
+    #[test]
+    fn example_pi_files() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp/pi");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("lamasery.yaml");
+        std::fs::write(&p, config::EXAMPLE_CONFIG).unwrap();
+        let cfg = config::load(&p).unwrap();
+        let pi = cfg.tools.iter().find(|t| t.name == "pi").unwrap();
+        assert_eq!(pi.dir, dir.join("tools/pi"));
+        let m = &cfg.models[0];
+
+        let files = tool_files(&cfg, pi, m, Some(32768)).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, dir.join("tools/pi/agent/models.json"));
+        let json: serde_json::Value = serde_json::from_str(&files[0].1).unwrap();
+        let provider = &json["providers"]["lamasery"];
+        assert_eq!(provider["baseUrl"], "http://127.0.0.1:8080/v1");
+        assert_eq!(provider["models"][0]["id"], m.model_id());
+        assert_eq!(provider["models"][0]["contextWindow"], 32768);
+
+        let (argv, env) = tool_command(&cfg, pi, m, Some(32768)).unwrap();
+        assert_eq!(argv[0], dir.join("tools/pi/dist/pi/pi").to_string_lossy());
+        assert_eq!(
+            argv[1..],
+            ["--model".to_string(), format!("lamasery/{}", m.model_id())]
+        );
+        assert_eq!(
+            env["PI_CODING_AGENT_DIR"],
+            dir.join("tools/pi/agent").to_string_lossy()
+        );
+
+        // A file can't be written with a placeholder left in it.
+        let mut no_ctx = pi.clone();
+        no_ctx
+            .files
+            .insert("x.json".into(), "{\"n\": ${max_output}}".into());
+        assert!(tool_files(&cfg, &no_ctx, m, None).is_err());
     }
 }
